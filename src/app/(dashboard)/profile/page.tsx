@@ -154,10 +154,10 @@ export default function ProfilePage() {
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: '16px', marginTop: '32px', paddingTop: '24px', borderTop: '1px solid var(--border)' }}>
           {[
-            { icon: Package,   label: 'Items Listed',    value: loading ? '—' : myListings.length },
-            { icon: BookOpen,  label: 'Borrow Requests', value: loading ? '—' : stats.borrowHistory ?? 0 },
-            { icon: Briefcase, label: 'Gigs Completed',  value: loading ? '—' : stats.gigsCompleted ?? 0 },
-            { icon: Star,      label: 'Avg Rating',      value: loading ? '—' : stats.avgRating ?? '—' },
+            { icon: Package,   label: 'Total Items',         value: loading ? '—' : stats.totalItems ?? myListings.length },
+            { icon: BookOpen,  label: 'Total Cancellations', value: loading ? '—' : stats.totalCancellations ?? 0 },
+            { icon: Briefcase, label: 'Active Borrows',      value: loading ? '—' : stats.activeBorrows ?? 0 },
+            { icon: Star,      label: 'Active Lendings',     value: loading ? '—' : stats.activeLendings ?? 0 },
           ].map(({ icon: Icon, label, value }) => (
             <div key={label} style={{ textAlign: 'center' }}>
               <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '6px' }}>

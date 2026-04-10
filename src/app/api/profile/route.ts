@@ -18,6 +18,10 @@ export async function GET(req: NextRequest) {
     { count: borrowCount },
     { count: gigsCount },
     { data: reviews },
+    { count: totalItemsCount },
+    { count: totalCancellationsCount },
+    { count: activeBorrowsCount },
+    { count: activeLendingsCount },
   ] = await Promise.all([
     supabase.from('users').select('*').eq('id', targetId).single(),
     supabase.from('orders').select('*', { count: 'exact', head: true })
@@ -27,6 +31,21 @@ export async function GET(req: NextRequest) {
     supabase.from('orders').select('*', { count: 'exact', head: true })
       .eq('seller_id', targetId).eq('status', 'completed'),
     supabase.from('reviews').select('rating').eq('reviewee_id', targetId),
+    // Total items ever listed by user
+    supabase.from('listings').select('*', { count: 'exact', head: true })
+      .eq('user_id', targetId),
+    // Total cancelled borrow/lend transactions
+    supabase.from('borrow_requests').select('*', { count: 'exact', head: true })
+      .or(`requester_id.eq.${targetId},lender_id.eq.${targetId}`)
+      .eq('status', 'rejected'),
+    // Currently active borrows (user is borrower, status accepted/pending)
+    supabase.from('borrow_requests').select('*', { count: 'exact', head: true })
+      .eq('requester_id', targetId)
+      .in('status', ['pending', 'accepted']),
+    // Currently active lendings (user is lender, status accepted/pending)
+    supabase.from('borrow_requests').select('*', { count: 'exact', head: true })
+      .eq('lender_id', targetId)
+      .in('status', ['pending', 'accepted']),
   ])
 
   const avgRating =
@@ -41,6 +60,10 @@ export async function GET(req: NextRequest) {
       borrowHistory: borrowCount ?? 0,
       gigsCompleted: gigsCount ?? 0,
       avgRating,
+      totalItems: totalItemsCount ?? 0,
+      totalCancellations: totalCancellationsCount ?? 0,
+      activeBorrows: activeBorrowsCount ?? 0,
+      activeLendings: activeLendingsCount ?? 0,
     },
   })
 }
