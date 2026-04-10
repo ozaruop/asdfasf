@@ -114,8 +114,8 @@ export async function GET() {
     })
   }
 
-  for (const b of borrowSent ?? []) {
-    const lenderName = (b.users as any)?.full_name ?? 'someone'
+  for (const b of (borrowSent ?? []) as any[]) {
+    const lenderName =Array.isArray(b.users)? b.users[0]?.full_name: b.users?.full_name ?? 'someone'
     let title = `You borrowed "${b.item_name}"`
     if (b.status === 'pending')          title = `Borrow request sent for "${b.item_name}"`
     if (b.status === 'rejected')         title = `Borrow request for "${b.item_name}" was declined`
@@ -128,7 +128,7 @@ export async function GET() {
       role: 'borrower',
       title,
       subtitle: `Lender: ${lenderName}`,
-      time: b.created_at,
+      time: b.created_at as string,
       status: b.status,
       borrowId: b.id,
       returnedByBorrower: b.returned_by_borrower,
@@ -139,8 +139,8 @@ export async function GET() {
     })
   }
 
-  for (const b of borrowReceived ?? []) {
-    const borrowerName = (b.users as any)?.full_name ?? 'someone'
+  for (const b of (borrowReceived ?? []) as any[]){
+    const borrowerName =Array.isArray(b.users)? b.users[0]?.full_name: b.users?.full_name ?? 'someone'
     let title = `You lent "${b.item_name}" to ${borrowerName}`
     if (b.status === 'pending')          title = `${borrowerName} wants to borrow "${b.item_name}"`
     if (b.status === 'rejected')         title = `You declined "${b.item_name}" from ${borrowerName}`
@@ -153,7 +153,7 @@ export async function GET() {
       role: 'lender',
       title,
       subtitle: `Borrower: ${borrowerName}`,
-      time: b.created_at,
+      time: b.created_at as string,
       status: b.status,
       borrowId: b.id,
       returnedByBorrower: b.returned_by_borrower,
