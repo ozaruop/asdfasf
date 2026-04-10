@@ -2,6 +2,9 @@ import { NextResponse } from 'next/server'
 import { auth } from '@clerk/nextjs/server'
 import { getSupabaseAdmin } from '@/lib/supabase/admin'
 
+// Active borrow statuses (item is still out)
+const ACTIVE_BORROW_STATUSES = ['pending', 'accepted', 'return_requested']
+
 export async function GET() {
   const { userId } = await auth()
   if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
@@ -14,40 +17,87 @@ export async function GET() {
     { data: borrowReceived },
     { data: ordersBuyer },
     { data: ordersSeller },
-    { count: completedCount },
+    { count: gigsCompleted },
     { count: activeBorrows },
-    { count: gigsCount },
+    { count: activeLendings },
   ] = await Promise.all([
-    supabase.from('listings').select('id, title, price, category, created_at, is_available')
-      .eq('user_id', userId).order('created_at', { ascending: false }).limit(10),
-    supabase.from('borrow_requests')
-      .select('id, item_name, status, created_at, users!borrow_requests_lender_id_fkey(full_name)')
-      .eq('requester_id', userId).order('created_at', { ascending: false }).limit(10),
-    supabase.from('borrow_requests')
-      .select('id, item_name, status, created_at, users!borrow_requests_requester_id_fkey(full_name)')
-      .eq('lender_id', userId).order('created_at', { ascending: false }).limit(10),
-    supabase.from('orders')
-      .select('id, amount, status, created_at, gigs(title)')
-      .eq('buyer_id', userId).order('created_at', { ascending: false }).limit(10),
-    supabase.from('orders')
-      .select('id, amount, status, created_at, gigs(title)')
-      .eq('seller_id', userId).order('created_at', { ascending: false }).limit(10),
-    supabase.from('orders').select('*', { count: 'exact', head: true })
-      .eq('seller_id', userId).eq('status', 'completed'),
-    supabase.from('borrow_requests').select('*', { count: 'exact', head: true })
-      .eq('requester_id', userId).in('status', ['pending', 'accepted']),
-    supabase.from('orders').select('*', { count: 'exact', head: true })
-      .eq('seller_id', userId).eq('status', 'completed'),
+    supabase
+      .from('listings')
+      .select('id, title, price, category, created_at, is_available')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(10),
+
+    // Current user is BORROWER (sent the request)
+    supabase
+      .from('borrow_requests')
+      .select(
+        'id, item_name, status, created_at, returned_by_borrower, confirmed_by_lender, returned_on_time, item_damaged, ' +
+        'users!borrow_requests_lender_id_fkey(full_name)'
+      )
+      .eq('requester_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(15),
+
+    // Current user is LENDER (received the request)
+    supabase
+      .from('borrow_requests')
+      .select(
+        'id, item_name, status, created_at, returned_by_borrower, confirmed_by_lender, returned_on_time, item_damaged, ' +
+        'users!borrow_requests_requester_id_fkey(full_name)'
+      )
+      .eq('lender_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(15),
+
+    supabase
+      .from('orders')
+      .select('id, amount, status, created_at, gigs(title), listings(title)')
+      .eq('buyer_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(10),
+
+    supabase
+      .from('orders')
+      .select('id, amount, status, created_at, gigs(title), listings(title)')
+      .eq('seller_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(10),
+
+    supabase
+      .from('orders')
+      .select('*', { count: 'exact', head: true })
+      .eq('seller_id', userId)
+      .eq('status', 'completed'),
+
+    // Active borrows: user borrowed something, not yet returned
+    supabase
+      .from('borrow_requests')
+      .select('*', { count: 'exact', head: true })
+      .eq('requester_id', userId)
+      .in('status', ACTIVE_BORROW_STATUSES),
+
+    // Active lendings: user lent something, not yet confirmed returned
+    supabase
+      .from('borrow_requests')
+      .select('*', { count: 'exact', head: true })
+      .eq('lender_id', userId)
+      .in('status', ACTIVE_BORROW_STATUSES),
   ])
 
-  // Build unified activity feed
   const feed: Array<{
     id: string
     type: string
+    role: 'borrower' | 'lender' | 'buyer' | 'seller' | 'owner'
     title: string
     subtitle: string
     time: string
     status: string
+    borrowId?: string
+    returnedByBorrower?: boolean
+    confirmedByLender?: boolean
+    returnedOnTime?: boolean | null
+    itemDamaged?: boolean | null
     href: string
   }> = []
 
@@ -55,6 +105,7 @@ export async function GET() {
     feed.push({
       id: `listing-${l.id}`,
       type: 'listing',
+      role: 'owner',
       title: `You listed "${l.title}"`,
       subtitle: `₹${Number(l.price).toLocaleString()} · ${l.category}`,
       time: l.created_at,
@@ -65,36 +116,61 @@ export async function GET() {
 
   for (const b of borrowSent ?? []) {
     const lenderName = (b.users as any)?.full_name ?? 'someone'
+    let title = `You borrowed "${b.item_name}"`
+    if (b.status === 'pending')          title = `Borrow request sent for "${b.item_name}"`
+    if (b.status === 'rejected')         title = `Borrow request for "${b.item_name}" was declined`
+    if (b.status === 'return_requested') title = `Return pending confirmation — "${b.item_name}"`
+    if (b.status === 'completed')        title = `You returned "${b.item_name}" ✓`
+
     feed.push({
       id: `borrow-sent-${b.id}`,
       type: 'borrow',
-      title: `Borrow request for "${b.item_name}"`,
-      subtitle: `From ${lenderName}`,
+      role: 'borrower',
+      title,
+      subtitle: `Lender: ${lenderName}`,
       time: b.created_at,
       status: b.status,
+      borrowId: b.id,
+      returnedByBorrower: b.returned_by_borrower,
+      confirmedByLender: b.confirmed_by_lender,
+      returnedOnTime: b.returned_on_time,
+      itemDamaged: b.item_damaged,
       href: '/borrow',
     })
   }
 
   for (const b of borrowReceived ?? []) {
-    const requesterName = (b.users as any)?.full_name ?? 'someone'
+    const borrowerName = (b.users as any)?.full_name ?? 'someone'
+    let title = `You lent "${b.item_name}" to ${borrowerName}`
+    if (b.status === 'pending')          title = `${borrowerName} wants to borrow "${b.item_name}"`
+    if (b.status === 'rejected')         title = `You declined "${b.item_name}" from ${borrowerName}`
+    if (b.status === 'return_requested') title = `${borrowerName} says they returned "${b.item_name}"`
+    if (b.status === 'completed')        title = `"${b.item_name}" returned by ${borrowerName} ✓`
+
     feed.push({
       id: `borrow-recv-${b.id}`,
       type: 'borrow',
-      title: `Borrow request received for "${b.item_name}"`,
-      subtitle: `From ${requesterName}`,
+      role: 'lender',
+      title,
+      subtitle: `Borrower: ${borrowerName}`,
       time: b.created_at,
       status: b.status,
+      borrowId: b.id,
+      returnedByBorrower: b.returned_by_borrower,
+      confirmedByLender: b.confirmed_by_lender,
+      returnedOnTime: b.returned_on_time,
+      itemDamaged: b.item_damaged,
       href: '/borrow',
     })
   }
 
   for (const o of ordersBuyer ?? []) {
-    const gigTitle = (o.gigs as any)?.title ?? 'a gig'
+    const title = (o.gigs as any)?.title ?? (o.listings as any)?.title ?? 'an item'
     feed.push({
       id: `order-buy-${o.id}`,
-      type: 'gig',
-      title: `You hired "${gigTitle}"`,
+      type: 'order',
+      role: 'buyer',
+      title: `You hired "${title}"`,
       subtitle: `₹${Number(o.amount).toLocaleString()}`,
       time: o.created_at,
       status: o.status,
@@ -103,11 +179,12 @@ export async function GET() {
   }
 
   for (const o of ordersSeller ?? []) {
-    const gigTitle = (o.gigs as any)?.title ?? 'your gig'
+    const title = (o.gigs as any)?.title ?? (o.listings as any)?.title ?? 'your item'
     feed.push({
       id: `order-sell-${o.id}`,
-      type: 'gig',
-      title: `Order received for "${gigTitle}"`,
+      type: 'order',
+      role: 'seller',
+      title: `Order received for "${title}"`,
       subtitle: `₹${Number(o.amount).toLocaleString()}`,
       time: o.created_at,
       status: o.status,
@@ -115,15 +192,14 @@ export async function GET() {
     })
   }
 
-  // Sort by time descending
   feed.sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime())
 
   return NextResponse.json({
-    feed: feed.slice(0, 20),
+    feed: feed.slice(0, 30),
     stats: {
-      totalTransactions: (completedCount ?? 0) + (listings?.length ?? 0),
       activeBorrows: activeBorrows ?? 0,
-      gigsCompleted: gigsCount ?? 0,
+      activeLendings: activeLendings ?? 0,
+      gigsCompleted: gigsCompleted ?? 0,
     },
   })
 }
