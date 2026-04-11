@@ -31,18 +31,14 @@ export async function GET(req: NextRequest) {
     supabase.from('orders').select('*', { count: 'exact', head: true })
       .eq('seller_id', targetId).eq('status', 'completed'),
     supabase.from('reviews').select('rating').eq('reviewee_id', targetId),
-    // Total items ever listed by user
     supabase.from('listings').select('*', { count: 'exact', head: true })
       .eq('user_id', targetId),
-    // Total cancelled borrow/lend transactions
     supabase.from('borrow_requests').select('*', { count: 'exact', head: true })
       .or(`requester_id.eq.${targetId},lender_id.eq.${targetId}`)
       .eq('status', 'rejected'),
-    // Currently active borrows (user is borrower, status accepted/pending)
     supabase.from('borrow_requests').select('*', { count: 'exact', head: true })
       .eq('requester_id', targetId)
       .in('status', ['pending', 'accepted']),
-    // Currently active lendings (user is lender, status accepted/pending)
     supabase.from('borrow_requests').select('*', { count: 'exact', head: true })
       .eq('lender_id', targetId)
       .in('status', ['pending', 'accepted']),
@@ -73,7 +69,8 @@ export async function PATCH(req: NextRequest) {
   if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const body = await req.json()
-  const allowed = ['full_name', 'college', 'avatar_url']
+  // phone_number added here — existing fields unchanged
+  const allowed = ['full_name', 'college', 'avatar_url', 'phone_number']
   const updates: Record<string, string> = {}
   for (const key of allowed) {
     if (body[key] !== undefined) updates[key] = body[key]
