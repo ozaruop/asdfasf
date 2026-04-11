@@ -3,6 +3,30 @@ import { auth } from '@clerk/nextjs/server'
 import { getSupabaseAdmin } from '@/lib/supabase/admin'
 import crypto from 'crypto'
 
+// ── Helper: atomically add delta to a user's trust_score ─────────────────────
+// Fetches current score first to avoid overwriting concurrent updates.
+// Runs only once per call — callers must gate on transaction status themselves.
+async function addTrustScore(
+  supabase: ReturnType<typeof getSupabaseAdmin>,
+  userId: string,
+  delta: number,
+): Promise<void> {
+  const { data: user } = await supabase
+    .from('users')
+    .select('trust_score')
+    .eq('id', userId)
+    .single()
+
+  if (!user) return
+
+  const newScore = Math.max(0, (user.trust_score ?? 0) + delta)
+
+  await supabase
+    .from('users')
+    .update({ trust_score: newScore })
+    .eq('id', userId)
+}
+
 export async function POST(req: NextRequest) {
   const { userId } = await auth()
   if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
@@ -36,24 +60,32 @@ export async function POST(req: NextRequest) {
       status: 'completed',
     })
     .eq('id', db_order_id)
+    // Guard: only update if not already completed — prevents duplicate trust awards
+    .neq('status', 'completed')
     .select()
     .single()
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 })
 
-  // If listing purchase, mark it as sold
+  // data is null when .neq guard fired (already completed) — safe to skip
+  if (!data) {
+    return NextResponse.json({ success: true, skipped: true })
+  }
+
+  // ── If listing purchase, mark it as sold ──────────────────────────────────
   if (data.listing_id) {
     await supabase
       .from('listings')
       .update({ is_available: false })
       .eq('id', data.listing_id)
 
-    // Increment seller transactions
+    // Increment seller transaction count
     const { data: seller } = await supabase
       .from('users')
       .select('total_transactions')
       .eq('id', data.seller_id)
       .single()
+
     if (seller) {
       await supabase
         .from('users')
@@ -61,6 +93,14 @@ export async function POST(req: NextRequest) {
         .eq('id', data.seller_id)
     }
   }
+
+  // ── TRUST SCORE: +50 for buyer, +50 for seller on every completed payment ──
+  // Runs only when status transitions to 'completed' (guarded by .neq above).
+  await Promise.all([
+    addTrustScore(supabase, data.buyer_id, 50),
+    addTrustScore(supabase, data.seller_id, 50),
+  ])
+  // ── END TRUST SCORE ────────────────────────────────────────────────────────
 
   return NextResponse.json({ success: true, order: data })
 }

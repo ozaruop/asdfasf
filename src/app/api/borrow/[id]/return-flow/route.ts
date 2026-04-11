@@ -19,6 +19,34 @@ import { getSupabaseAdmin } from '@/lib/supabase/admin'
  *   { action: 'lender_deny' }
  *   → status: 'accepted' (back to active)
  */
+
+// ── Helper: atomically add delta to a user's trust_score ─────────────────────
+// Fetches the current score first to avoid blind overwrites.
+// delta can be positive (reward) or negative (penalty); floor is 0.
+// Must only be called after the status-transition guard has already fired,
+// which ensures this runs at most once per borrow request.
+async function addTrustScore(
+  supabase: ReturnType<typeof getSupabaseAdmin>,
+  userId: string,
+  delta: number,
+): Promise<void> {
+  const { data: user } = await supabase
+    .from('users')
+    .select('trust_score')
+    .eq('id', userId)
+    .single()
+
+  if (!user) return
+
+  const newScore = Math.max(0, (user.trust_score ?? 0) + delta)
+
+  await supabase
+    .from('users')
+    .update({ trust_score: newScore })
+    .eq('id', userId)
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -77,6 +105,9 @@ export async function PATCH(
     if (borrow.lender_id !== userId)
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
 
+    // "Runs only once" guard:
+    // Once status moves to 'completed', any replay of lender_confirm hits this
+    // and returns 409 — so trust score blocks below execute at most once.
     if (borrow.status !== 'return_requested')
       return NextResponse.json({ error: 'No pending return to confirm' }, { status: 409 })
 
@@ -145,6 +176,46 @@ export async function PATCH(
       ...notifPayload,
     })
   }
+
+  // ── TRUST SCORE — only fires on lender_confirm ────────────────────────────
+  //
+  // Idempotency guarantee: the `if (borrow.status !== 'return_requested')` guard
+  // above returns 409 on any replay after status has moved to 'completed', so
+  // the block below executes AT MOST ONCE per borrow request.
+  //
+  if (action === 'lender_confirm') {
+    const { returned_on_time, item_damaged } = body as {
+      returned_on_time: boolean
+      item_damaged: boolean
+    }
+
+    // CASE 1 — Clean return: on time AND undamaged
+    // borrower +50 · lender +50
+    if (returned_on_time === true && item_damaged === false) {
+      await Promise.all([
+        addTrustScore(supabase, borrow.requester_id, +50), // borrower +50
+        addTrustScore(supabase, borrow.lender_id,   +50), // lender   +50
+      ])
+    }
+
+    // ── INJECTED LOGIC ────────────────────────────────────────────────────────
+    // CASE 2 — Bad return: item DAMAGED or returned LATE (or both)
+    // borrower -30 (penalty) · lender +50 (compensated for the trouble)
+    //
+    // Trigger condition:
+    //   item_damaged === true   → item returned with damage
+    //   returned_on_time === false → item returned late
+    //   Either condition alone is sufficient to trigger the penalty.
+    //
+    else if (item_damaged === true || returned_on_time === false) {
+      await Promise.all([
+        addTrustScore(supabase, borrow.requester_id, -30), // borrower -30
+        addTrustScore(supabase, borrow.lender_id,   +50), // lender   +50
+      ])
+    }
+    // ── END INJECTED LOGIC ────────────────────────────────────────────────────
+  }
+  // ── END TRUST SCORE ───────────────────────────────────────────────────────
 
   return NextResponse.json(data)
 }

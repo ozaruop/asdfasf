@@ -2,6 +2,30 @@ import { NextRequest, NextResponse } from 'next/server'
 import { auth } from '@clerk/nextjs/server'
 import { getSupabaseAdmin } from '@/lib/supabase/admin'
 
+// ── Helper: atomically add delta to a user's trust_score ─────────────────────
+// Fetches current score first to avoid overwriting concurrent updates.
+// Runs only once per call — callers must gate on transaction status themselves.
+async function addTrustScore(
+  supabase: ReturnType<typeof getSupabaseAdmin>,
+  userId: string,
+  delta: number,
+): Promise<void> {
+  const { data: user } = await supabase
+    .from('users')
+    .select('trust_score')
+    .eq('id', userId)
+    .single()
+
+  if (!user) return
+
+  const newScore = Math.max(0, (user.trust_score ?? 0) + delta)
+
+  await supabase
+    .from('users')
+    .update({ trust_score: newScore })
+    .eq('id', userId)
+}
+
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { userId } = await auth()
   if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
@@ -15,7 +39,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
   const supabase = getSupabaseAdmin()
   const { data: order, error: orderError } = await supabase
     .from('orders')
-    .select('buyer_id, seller_id, amount, gigs(title)')
+    .select('buyer_id, seller_id, amount, status, gigs(title)')
     .eq('id', id)
     .single()
 
@@ -23,6 +47,12 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
 
   const allowed = order.seller_id === userId || order.buyer_id === userId
   if (!allowed) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+
+  // Guard: prevent re-processing an already-completed order
+  // This ensures trust score is only awarded once per transaction
+  if (order.status === 'completed' && status === 'completed') {
+    return NextResponse.json({ error: 'Order already completed' }, { status: 409 })
+  }
 
   const { data, error } = await supabase
     .from('orders')
@@ -56,7 +86,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       href: '/activity',
     })
 
-    // Update seller transaction count (FIXED)
+    // Update seller transaction count
     const { error: updateError } = await supabase
       .from('users')
       .update({
@@ -69,6 +99,14 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     if (updateError) {
       console.error('Failed to update transactions:', updateError)
     }
+
+    // ── TRUST SCORE: +50 for buyer, +50 for seller on completion ─────────────
+    // Guarded above by the 409 check — only runs once per order.
+    await Promise.all([
+      addTrustScore(supabase, order.buyer_id, 50),
+      addTrustScore(supabase, order.seller_id, 50),
+    ])
+    // ── END TRUST SCORE ────────────────────────────────────────────────────────
   }
 
   return NextResponse.json(data)
