@@ -13,7 +13,6 @@ export async function GET(req: NextRequest) {
     .order('created_at', { ascending: false })
 
   if (listing_id) {
-    // Return booked slots for a specific listing (pending + accepted only)
     query = supabase
       .from('borrow_requests')
       .select('selected_slots, duration_type, borrow_from, borrow_until, status')
@@ -33,43 +32,57 @@ export async function POST(req: NextRequest) {
   const body = await req.json()
   const {
     item_name, description, lender_id, listing_id,
-    // legacy date fields
     borrow_from, borrow_until,
-    // new slot-based fields
     duration_type, selected_slots, total_amount,
-    razorpay_payment_id,
   } = body
 
   if (!item_name || !lender_id) {
     return NextResponse.json({ error: 'item_name and lender_id required' }, { status: 400 })
   }
 
-  // Derive borrow_from / borrow_until from selected_slots when using slot mode
+  // ✅ SINGLE declaration (keep only this one)
+  const supabase = getSupabaseAdmin()
+
+  // Duplicate request prevention
+  if (listing_id) {
+    const { data: dup } = await supabase
+      .from('borrow_requests')
+      .select('id, status')
+      .eq('listing_id', listing_id)
+      .eq('requester_id', userId)
+      .in('status', ['pending', 'accepted'])
+      .limit(1)
+
+    if (dup && dup.length > 0) {
+      return NextResponse.json(
+        { error: 'You already have a pending or accepted request for this item' },
+        { status: 409 }
+      )
+    }
+  }
+
   let resolvedFrom = borrow_from
   let resolvedUntil = borrow_until
 
   if (selected_slots && Array.isArray(selected_slots) && selected_slots.length > 0) {
     const sorted = [...selected_slots].sort()
     if (duration_type === 'hour') {
-      // slots are "YYYY-MM-DD HH:00" strings — derive date portion
       const datePart = sorted[0].split(' ')[0]
       resolvedFrom = datePart
       resolvedUntil = datePart
     } else {
-      // day-wise: slots are "YYYY-MM-DD"
       resolvedFrom = sorted[0]
       resolvedUntil = sorted[sorted.length - 1]
     }
   }
 
-  // Ensure NOT NULL constraint is satisfied
   if (!resolvedFrom || !resolvedUntil) {
     return NextResponse.json({ error: 'borrow dates are required' }, { status: 400 })
   }
 
-  const supabase = getSupabaseAdmin()
+  // ✅ NO second supabase declaration here
 
-  // Validate: no slot overlap with existing pending/accepted requests
+  // Slot overlap validation
   if (selected_slots && listing_id) {
     const { data: existing } = await supabase
       .from('borrow_requests')
@@ -81,6 +94,7 @@ export async function POST(req: NextRequest) {
     for (const req of existing ?? []) {
       for (const slot of req.selected_slots ?? []) bookedSet.add(slot)
     }
+
     const conflict = selected_slots.some((s: string) => bookedSet.has(s))
     if (conflict) {
       return NextResponse.json({ error: 'Some selected slots are already booked' }, { status: 409 })
@@ -98,10 +112,11 @@ export async function POST(req: NextRequest) {
       borrow_from: resolvedFrom,
       borrow_until: resolvedUntil,
       status: 'pending',
+      payment_status: 'unpaid',
       duration_type: duration_type ?? null,
       selected_slots: selected_slots ?? null,
       total_amount: total_amount ?? null,
-      razorpay_payment_id: razorpay_payment_id ?? null,
+      razorpay_payment_id: null,
     })
     .select()
     .single()
@@ -109,7 +124,11 @@ export async function POST(req: NextRequest) {
   if (error) return NextResponse.json({ error: error.message }, { status: 500 })
 
   const { data: requester } = await supabase
-    .from('users').select('full_name').eq('id', userId).single()
+    .from('users')
+    .select('full_name')
+    .eq('id', userId)
+    .single()
+
   await supabase.from('notifications').insert({
     user_id: lender_id,
     type: 'request',

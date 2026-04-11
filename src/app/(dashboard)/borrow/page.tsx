@@ -8,11 +8,26 @@ import { toast } from 'sonner'
 import { useUser } from '@clerk/nextjs'
 import { useRouter } from 'next/navigation'
 
+declare global { interface Window { Razorpay: any } }
+
+// FIX: load Razorpay script dynamically for payment after approval
+function loadRazorpay(): Promise<boolean> {
+  return new Promise(resolve => {
+    if (typeof window !== 'undefined' && window.Razorpay) return resolve(true)
+    const s = document.createElement('script')
+    s.src = 'https://checkout.razorpay.com/v1/checkout.js'
+    s.onload = () => resolve(true)
+    s.onerror = () => resolve(false)
+    document.body.appendChild(s)
+  })
+}
+
 const statusColors: Record<string, { color: string; bg: string }> = {
   pending:  { color: '#b45309', bg: '#fef3c7' },
   accepted: { color: '#15803d', bg: '#dcfce7' },
   rejected: { color: '#b91c1c', bg: '#fee2e2' },
   returned: { color: '#464555', bg: '#edeeef' },
+  active:   { color: '#1d4ed8', bg: '#dbeafe' }, // FIX: paid + active borrow
 }
 
 const conditionColors: Record<string, string> = {
@@ -37,6 +52,7 @@ export default function BorrowPage() {
   const [receivedRequests, setReceivedRequests] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
   const [updating, setUpdating] = useState<string|null>(null)
+  const [paying, setPaying] = useState<string|null>(null) // FIX: track which request is being paid
 
   const fetchData = useCallback(async () => {
     setLoading(true)
@@ -69,6 +85,62 @@ export default function BorrowPage() {
     } else {
       toast.error('Failed to update request')
     }
+  }
+
+  // FIX: payment handler — only called after lender approves (status === 'accepted')
+  const handlePay = async (req: any) => {
+    if (paying) return
+    setPaying(req.id)
+
+    const loaded = await loadRazorpay()
+    if (!loaded) { toast.error('Failed to load payment gateway'); setPaying(null); return }
+
+    // Create Razorpay order — backend will verify status === 'accepted'
+    const orderRes = await fetch('/api/razorpay/create-order', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: 'borrow',
+        id: req.listing_id,
+        listing_id: req.listing_id,
+        lender_id: req.lender_id,
+        total_amount: req.total_amount,
+        borrow_request_id: req.id,   // FIX: passed so backend can verify approved status
+      }),
+    })
+    const orderData = await orderRes.json()
+    if (!orderRes.ok) { toast.error(orderData.error ?? 'Failed to create order'); setPaying(null); return }
+
+    const options = {
+      key: orderData.key,
+      amount: orderData.amount,
+      currency: 'INR',
+      name: 'UniXchange',
+      description: req.item_name,
+      order_id: orderData.razorpay_order_id,
+      theme: { color: '#3525cd' },
+      handler: async (response: any) => {
+        // Verify payment on backend + update borrow_request status to 'active'
+        const verifyRes = await fetch('/api/razorpay/verify', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            razorpay_order_id: response.razorpay_order_id,
+            razorpay_payment_id: response.razorpay_payment_id,
+            razorpay_signature: response.razorpay_signature,
+            db_order_id: orderData.db_order_id,
+            borrow_request_id: req.id,   // FIX: so verify route can update borrow_request
+          }),
+        })
+        const verifyData = await verifyRes.json()
+        if (!verifyRes.ok) { toast.error(verifyData.error ?? 'Payment verification failed'); setPaying(null); return }
+        toast.success('Payment successful! 🎉', { description: `Borrowing "${req.item_name}" confirmed.` })
+        setPaying(null)
+        fetchData()
+      },
+      modal: { ondismiss: () => setPaying(null) },
+    }
+    const rzp = new window.Razorpay(options)
+    rzp.on('payment.failed', (r: any) => { toast.error(`Payment failed: ${r.error.description}`); setPaying(null) })
+    rzp.open()
   }
 
   const filtered = listings.filter(l =>
@@ -209,11 +281,23 @@ export default function BorrowPage() {
                 </div>
                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '8px', flexShrink: 0 }}>
                   <span style={{ fontSize: '10px', fontWeight: 700, padding: '4px 10px', borderRadius: '999px', backgroundColor: status.bg, color: status.color }}>{req.status.toUpperCase()}</span>
-                  {req.status === 'accepted' && (
+                  {/* FIX: show Pay Now button only when approved and unpaid */}
+                  {req.status === 'accepted' && req.payment_status !== 'paid' && req.total_amount && (
+                    <button onClick={() => handlePay(req)} disabled={paying === req.id}
+                      className="signature-gradient"
+                      style={{ padding: '7px 14px', borderRadius: '8px', border: 'none', color: 'white', fontWeight: 700, fontSize: '11px', cursor: paying === req.id ? 'not-allowed' : 'pointer', opacity: paying === req.id ? 0.7 : 1, display: 'flex', alignItems: 'center', gap: '4px' }}>
+                      {paying === req.id ? 'Processing...' : `Pay Now · ₹${req.total_amount}`}
+                    </button>
+                  )}
+                  {/* FIX: show Mark Returned only after payment is done */}
+                  {req.status === 'active' && (
                     <button onClick={() => handleStatusUpdate(req.id, 'returned')} disabled={updating === req.id}
                       style={{ fontSize: '11px', color: '#15803d', fontWeight: 600, background: 'none', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px' }}>
                       Mark Returned <ArrowRight size={12} />
                     </button>
+                  )}
+                  {req.status === 'pending' && (
+                    <span style={{ fontSize: '10px', color: 'var(--on-surface-variant)', fontStyle: 'italic' }}>Awaiting lender</span>
                   )}
                 </div>
               </motion.div>

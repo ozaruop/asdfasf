@@ -36,6 +36,7 @@ export async function POST(req: NextRequest) {
     razorpay_payment_id,
     razorpay_signature,
     db_order_id,
+    borrow_request_id,   // FIX: included in body so we can update borrow_request after payment
   } = await req.json()
 
   // Verify signature
@@ -91,6 +92,36 @@ export async function POST(req: NextRequest) {
         .from('users')
         .update({ total_transactions: (seller.total_transactions ?? 0) + 1 })
         .eq('id', data.seller_id)
+    }
+  }
+
+  // FIX: after borrow payment success, update borrow_request status + payment_status
+  if (borrow_request_id) {
+    await supabase
+      .from('borrow_requests')
+      .update({
+        status: 'active',
+        payment_status: 'paid',
+        razorpay_payment_id,
+      })
+      .eq('id', borrow_request_id)
+      .eq('status', 'accepted') // idempotency guard
+
+    // Notify borrower of successful payment
+    const { data: borrowReq } = await supabase
+      .from('borrow_requests')
+      .select('requester_id, lender_id, item_name')
+      .eq('id', borrow_request_id)
+      .single()
+
+    if (borrowReq) {
+      await supabase.from('notifications').insert({
+        user_id: borrowReq.requester_id,
+        type: 'payment',
+        title: '🎉 Borrowing confirmed!',
+        body: `Payment successful for "${borrowReq.item_name}". Enjoy your borrow!`,
+        href: '/borrow',
+      })
     }
   }
 

@@ -62,7 +62,8 @@ function HourBorrowPanel({
   )
   const [selectedHours, setSelectedHours] = useState<string[]>([])
   const [reason, setReason] = useState('')
-  const [paying, setPaying] = useState(false)
+  // FIX: renamed paying -> submitting; payment removed from this panel
+  const [submitting, setSubmitting] = useState(false)
 
   const pricePerHour = Number(listing.price_per_hour ?? listing.price ?? 0)
   const total = selectedHours.length * pricePerHour
@@ -77,54 +78,25 @@ function HourBorrowPanel({
 
   useEffect(() => { setSelectedHours([]) }, [selectedDate])
 
-  const handlePay = async () => {
+  // FIX: submit request only — no payment here. Payment happens after lender approval.
+  const handleRequestOnly = async () => {
     if (selectedHours.length === 0) { toast.error('Select at least one hour slot'); return }
-    setPaying(true)
-
-    const loaded = await loadRazorpay()
-    if (!loaded) { toast.error('Failed to load payment gateway'); setPaying(false); return }
-
-    const orderRes = await fetch('/api/razorpay/create-order', {
+    setSubmitting(true)
+    const slots = selectedHours.map(h => slotToKey(selectedDate, h))
+    const borrowRes = await fetch('/api/borrow', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        type: 'borrow', id: listing.id,
-        listing_id: listing.id, lender_id: listing.user_id, total_amount: total,
+        item_name: listing.title, description: reason,
+        lender_id: listing.user_id, listing_id: listing.id,
+        duration_type: 'hour', selected_slots: slots,
+        total_amount: total,
       }),
     })
-    const orderData = await orderRes.json()
-    if (!orderRes.ok) { toast.error(orderData.error ?? 'Failed to create order'); setPaying(false); return }
-
-    const slots = selectedHours.map(h => slotToKey(selectedDate, h))
-
-    const options = {
-      key: orderData.key,
-      amount: orderData.amount,
-      currency: 'INR',
-      name: 'UniXchange',
-      description: listing.title,
-      order_id: orderData.razorpay_order_id,
-      theme: { color: '#3525cd' },
-      handler: async (response: any) => {
-        const borrowRes = await fetch('/api/borrow', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            item_name: listing.title, description: reason,
-            lender_id: listing.user_id, listing_id: listing.id,
-            duration_type: 'hour', selected_slots: slots,
-            total_amount: total, razorpay_payment_id: response.razorpay_payment_id,
-          }),
-        })
-        const borrowData = await borrowRes.json()
-        if (!borrowRes.ok) { toast.error(borrowData.error ?? 'Failed to create borrow request'); setPaying(false); return }
-        toast.success('Booking confirmed! 🎉', { description: `₹${total} paid · ${slots.length} hour(s) booked` })
-        onSuccess()
-      },
-      modal: { ondismiss: () => setPaying(false) },
-    }
-    const rzp = new window.Razorpay(options)
-    rzp.on('payment.failed', (r: any) => { toast.error(`Payment failed: ${r.error.description}`); setPaying(false) })
-    rzp.open()
-    setPaying(false)
+    const borrowData = await borrowRes.json()
+    setSubmitting(false)
+    if (!borrowRes.ok) { toast.error(borrowData.error ?? 'Failed to send request'); return }
+    toast.success('Request sent! 🎉', { description: "Waiting for lender approval. You'll be notified when approved." })
+    onSuccess()
   }
 
   return (
@@ -176,21 +148,27 @@ function HourBorrowPanel({
         placeholder="Why do you need this? (optional)" rows={2}
         style={{ width: '100%', padding: '8px 12px', borderRadius: '10px', fontSize: '13px', outline: 'none', resize: 'none', marginBottom: '12px', border: '1px solid var(--border)', backgroundColor: 'var(--surface-container)', color: 'var(--on-surface)' }} />
 
-      <button onClick={handlePay} disabled={paying || selectedHours.length === 0}
+      {/* FIX: button sends request only, payment after approval */}
+      <button onClick={handleRequestOnly} disabled={submitting || selectedHours.length === 0}
         className={selectedHours.length > 0 ? 'signature-gradient' : ''}
         style={{
           width: '100%', padding: '13px', borderRadius: '12px', fontWeight: 700, fontSize: '14px', border: 'none',
-          cursor: paying || selectedHours.length === 0 ? 'not-allowed' : 'pointer',
+          cursor: submitting || selectedHours.length === 0 ? 'not-allowed' : 'pointer',
           opacity: selectedHours.length === 0 ? 0.5 : 1,
           display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px',
           backgroundColor: selectedHours.length === 0 ? 'var(--surface-container)' : undefined,
           color: selectedHours.length === 0 ? 'var(--outline)' : 'white',
           fontFamily: 'var(--font-manrope)',
         }}>
-        {paying
-          ? <><Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> Processing...</>
-          : selectedHours.length > 0 ? `Proceed to Payment · ₹${total}` : 'Select hour slots above'}
+        {submitting
+          ? <><Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> Sending Request...</>
+          : selectedHours.length > 0 ? `Send Borrow Request · ₹${total}` : 'Select hour slots above'}
       </button>
+      {selectedHours.length > 0 && (
+        <p style={{ fontSize: '11px', color: 'var(--on-surface-variant)', textAlign: 'center', marginTop: '8px' }}>
+          💡 Payment only required after lender approves
+        </p>
+      )}
     </motion.div>
   )
 }
@@ -207,7 +185,8 @@ function DayBorrowPanel({
   const [fromInput, setFromInput] = useState('')
   const [toInput, setToInput] = useState('')
   const [reason, setReason] = useState('')
-  const [paying, setPaying] = useState(false)
+  // FIX: renamed paying -> submitting
+  const [submitting, setSubmitting] = useState(false)
 
   const pricePerDay = Number(listing.price_per_day ?? listing.price ?? 0)
 
@@ -249,59 +228,27 @@ function DayBorrowPanel({
   const finalSelectedDays = allDays.length > 0 ? chipSelected : selectedDays
   const finalTotal = finalSelectedDays.length * pricePerDay
 
-  const handlePay = async () => {
+  // FIX: submit request only — payment happens after lender approval
+  const handleRequestOnly = async () => {
     if (finalSelectedDays.length === 0) { toast.error('Select at least one day'); return }
-
-    // Check for conflicts
     const conflict = finalSelectedDays.some(d => bookedSlots.has(d))
     if (conflict) { toast.error('Some selected days are already booked'); return }
-
-    setPaying(true)
-
-    const loaded = await loadRazorpay()
-    if (!loaded) { toast.error('Failed to load payment gateway'); setPaying(false); return }
-
-    const orderRes = await fetch('/api/razorpay/create-order', {
+    setSubmitting(true)
+    const sorted = [...finalSelectedDays].sort()
+    const borrowRes = await fetch('/api/borrow', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        type: 'borrow', id: listing.id,
-        listing_id: listing.id, lender_id: listing.user_id, total_amount: finalTotal,
+        item_name: listing.title, description: reason,
+        lender_id: listing.user_id, listing_id: listing.id,
+        duration_type: 'day', selected_slots: sorted,
+        total_amount: finalTotal,
       }),
     })
-    const orderData = await orderRes.json()
-    if (!orderRes.ok) { toast.error(orderData.error ?? 'Failed to create order'); setPaying(false); return }
-
-    const sorted = [...finalSelectedDays].sort()
-
-    const options = {
-      key: orderData.key,
-      amount: orderData.amount,
-      currency: 'INR',
-      name: 'UniXchange',
-      description: listing.title,
-      order_id: orderData.razorpay_order_id,
-      theme: { color: '#3525cd' },
-      handler: async (response: any) => {
-        const borrowRes = await fetch('/api/borrow', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            item_name: listing.title, description: reason,
-            lender_id: listing.user_id, listing_id: listing.id,
-            duration_type: 'day', selected_slots: sorted,
-            total_amount: finalTotal, razorpay_payment_id: response.razorpay_payment_id,
-          }),
-        })
-        const borrowData = await borrowRes.json()
-        if (!borrowRes.ok) { toast.error(borrowData.error ?? 'Failed to create borrow request'); setPaying(false); return }
-        toast.success('Booking confirmed! 🎉', { description: `₹${finalTotal} paid · ${finalSelectedDays.length} day(s) booked` })
-        onSuccess()
-      },
-      modal: { ondismiss: () => setPaying(false) },
-    }
-    const rzp = new window.Razorpay(options)
-    rzp.on('payment.failed', (r: any) => { toast.error(`Payment failed: ${r.error.description}`); setPaying(false) })
-    rzp.open()
-    setPaying(false)
+    const borrowData = await borrowRes.json()
+    setSubmitting(false)
+    if (!borrowRes.ok) { toast.error(borrowData.error ?? 'Failed to send request'); return }
+    toast.success('Request sent! 🎉', { description: "Waiting for lender approval. You'll be notified when approved." })
+    onSuccess()
   }
 
   return (
@@ -386,21 +333,27 @@ function DayBorrowPanel({
         placeholder="Why do you need this? (optional)" rows={2}
         style={{ width: '100%', padding: '8px 12px', borderRadius: '10px', fontSize: '13px', outline: 'none', resize: 'none', marginBottom: '12px', border: '1px solid var(--border)', backgroundColor: 'var(--surface-container)', color: 'var(--on-surface)' }} />
 
-      <button onClick={handlePay} disabled={paying || finalSelectedDays.length === 0}
+      {/* FIX: button sends request only, payment happens after approval */}
+      <button onClick={handleRequestOnly} disabled={submitting || finalSelectedDays.length === 0}
         className={finalSelectedDays.length > 0 ? 'signature-gradient' : ''}
         style={{
           width: '100%', padding: '13px', borderRadius: '12px', fontWeight: 700, fontSize: '14px', border: 'none',
-          cursor: paying || finalSelectedDays.length === 0 ? 'not-allowed' : 'pointer',
+          cursor: submitting || finalSelectedDays.length === 0 ? 'not-allowed' : 'pointer',
           opacity: finalSelectedDays.length === 0 ? 0.5 : 1,
           display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px',
           backgroundColor: finalSelectedDays.length === 0 ? 'var(--surface-container)' : undefined,
           color: finalSelectedDays.length === 0 ? 'var(--outline)' : 'white',
           fontFamily: 'var(--font-manrope)',
         }}>
-        {paying
-          ? <><Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> Processing...</>
-          : finalSelectedDays.length > 0 ? `Proceed to Payment · ₹${finalTotal}` : 'Select days above'}
+        {submitting
+          ? <><Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> Sending Request...</>
+          : finalSelectedDays.length > 0 ? `Send Borrow Request · ₹${finalTotal}` : 'Select days above'}
       </button>
+      {finalSelectedDays.length > 0 && (
+        <p style={{ fontSize: '11px', color: 'var(--on-surface-variant)', textAlign: 'center', marginTop: '8px' }}>
+          💡 Payment only required after lender approves
+        </p>
+      )}
     </motion.div>
   )
 }

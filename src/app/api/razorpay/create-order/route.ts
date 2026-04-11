@@ -54,8 +54,36 @@ export async function POST(req: NextRequest) {
       status: 'pending', payment_status: 'unpaid',
     }
   } else if (type === 'borrow') {
-    // Borrow payment: validate listing exists, compute amount from payload
-    const { listing_id, total_amount, lender_id } = body
+    // FIX: backend payment guard — only allow payment if borrow request is approved
+    const { listing_id, total_amount, lender_id, borrow_request_id } = body
+
+    // Verify borrow request exists and is approved before allowing payment
+    if (borrow_request_id) {
+      const { data: borrowReq } = await supabase
+        .from('borrow_requests')
+        .select('status, requester_id, payment_status')
+        .eq('id', borrow_request_id)
+        .single()
+
+      if (!borrowReq) {
+        return NextResponse.json({ error: 'Borrow request not found' }, { status: 404 })
+      }
+      if (borrowReq.requester_id !== userId) {
+        return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+      }
+      // FIX: block payment if not approved
+      if (borrowReq.status !== 'accepted') {
+        return NextResponse.json(
+          { error: 'Payment not allowed. Lender has not approved this request yet.' },
+          { status: 403 }
+        )
+      }
+      // FIX: block duplicate payment
+      if (borrowReq.payment_status === 'paid') {
+        return NextResponse.json({ error: 'This request has already been paid for.' }, { status: 409 })
+      }
+    }
+
     const { data: listing } = await supabase
       .from('listings').select('user_id, title, is_available').eq('id', listing_id).single()
     if (!listing) return NextResponse.json({ error: 'Listing not found' }, { status: 404 })
@@ -64,7 +92,6 @@ export async function POST(req: NextRequest) {
     amount = Math.round(Number(total_amount) * 100)
     sellerId = lender_id ?? listing.user_id
     title = listing.title
-    // No orders table entry for borrow — handled by borrow_requests after payment
     orderInsert = null
   } else {
     return NextResponse.json({ error: 'Invalid type' }, { status: 400 })

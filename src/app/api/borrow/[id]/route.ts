@@ -29,6 +29,13 @@ export async function PATCH(
   if (['accepted', 'rejected'].includes(status) && borrow.lender_id !== userId)
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
 
+  // FIX: idempotency — if already in that status, return current data without re-notifying
+  const { data: current } = await supabase
+    .from('borrow_requests').select('status').eq('id', id).single()
+  if (current?.status === status) {
+    return NextResponse.json(current)
+  }
+
   const { data, error } = await supabase
     .from('borrow_requests')
     .update({ status })
@@ -41,8 +48,11 @@ export async function PATCH(
   await supabase.from('notifications').insert({
     user_id: borrow.requester_id,
     type: status,
-    title: status === 'accepted' ? 'Request accepted!' : 'Request rejected',
-    body: `Your request for "${borrow.item_name}" was ${status}.`,
+    title: status === 'accepted' ? '✅ Request approved!' : '❌ Request rejected',
+    // FIX: accepted notification tells borrower to proceed to payment
+    body: status === 'accepted'
+      ? `Your request for "${borrow.item_name}" was approved. Please proceed to payment in My Requests.`
+      : `Your request for "${borrow.item_name}" was rejected.`,
     href: '/borrow',
   })
 
