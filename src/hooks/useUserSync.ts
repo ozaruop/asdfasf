@@ -19,6 +19,10 @@ export function useUserSync() {
         .single()
 
       if (!existing) {
+        // FIX: include phone_number: null explicitly so the column exists on the row.
+        // Without this, a PATCH to save phone_number immediately after signup
+        // could race against the insert and find 0 rows → Supabase throws
+        // "Cannot coerce the result to a single JSON object".
         await supabase.from('users').insert({
           id: user.id,
           email: user.emailAddresses[0]?.emailAddress ?? '',
@@ -26,6 +30,7 @@ export function useUserSync() {
           avatar_url: user.imageUrl ?? '',
           trust_score: 0,
           total_transactions: 0,
+          phone_number: null,
         })
         // Brand new user — definitely needs phone
         setNeedsPhone(true)

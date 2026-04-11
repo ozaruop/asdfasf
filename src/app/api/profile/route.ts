@@ -69,7 +69,6 @@ export async function PATCH(req: NextRequest) {
   if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const body = await req.json()
-  // phone_number added here — existing fields unchanged
   const allowed = ['full_name', 'college', 'avatar_url', 'phone_number']
   const updates: Record<string, string> = {}
   for (const key of allowed) {
@@ -80,10 +79,28 @@ export async function PATCH(req: NextRequest) {
     return NextResponse.json({ error: 'No valid fields' }, { status: 400 })
 
   const supabase = getSupabaseAdmin()
+
+  // Step 1: fetch the existing row so we have email/full_name/avatar_url
+  // These are NOT NULL columns — upsert needs them if it ends up inserting.
+  const { data: existingUser } = await supabase
+    .from('users')
+    .select('email, full_name, avatar_url')
+    .eq('id', userId)
+    .single()
+
+  // Step 2: upsert — merges existing required fields with the incoming updates
   const { data, error } = await supabase
     .from('users')
-    .update(updates)
-    .eq('id', userId)
+    .upsert(
+      {
+        id: userId,
+        email: existingUser?.email ?? '',        // satisfies NOT NULL constraint
+        full_name: existingUser?.full_name ?? '',
+        avatar_url: existingUser?.avatar_url ?? '',
+        ...updates,                               // overrides with whatever was patched
+      },
+      { onConflict: 'id' }
+    )
     .select()
     .single()
 
